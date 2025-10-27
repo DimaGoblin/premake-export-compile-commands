@@ -6,30 +6,25 @@ local m = p.modules.export_compile_commands
 local workspace = p.workspace
 local project = p.project
 
-function m.getToolset(cfg)
-  return p.tools[cfg.toolset or 'gcc']
-end
-
-function m.getIncludeDirs(cfg)
-  local flags = {}
-  for _, dir in ipairs(cfg.includedirs) do
-    table.insert(flags, '-I' .. p.quoted(dir))
-  end
-  for _, dir in ipairs(cfg.sysincludedir or {}) do
-    table.insert(result, '-isystem ' .. p.quoted(dir))
-  end
-  return flags
+function m.getToolset(cfg)  
+	local default = iif(cfg.system == p.WINDOWS, "msc", "clang")
+  return p.tools[_OPTIONS.cc or cfg.toolset or default]
 end
 
 function m.getCommonFlags(cfg)
   local toolset = m.getToolset(cfg)
   local flags = toolset.getcppflags(cfg)
-  flags = table.join(flags, toolset.getdefines(cfg.defines))
+
+  if _OPTIONS['force_clang_defines'] then
+    flags = table.join(flags, p.tools['clang'].getdefines(cfg.defines))
+  else
+    flags = table.join(flags, toolset.getdefines(cfg.defines))
+  end
+
   flags = table.join(flags, toolset.getundefines(cfg.undefines))
-  -- can't use toolset.getincludedirs because some tools that consume
-  -- compile_commands.json have problems with relative include paths
-  flags = table.join(flags, m.getIncludeDirs(cfg))
-  flags = table.join(flags, toolset.getcflags(cfg))
+  flags = table.join(flags, toolset.getforceincludes(cfg))
+  flags = table.join(flags, toolset.getincludedirs(cfg, cfg.includedirs, cfg.externalincludedirs))
+  flags = table.join(flags, toolset.getcxxflags(cfg))
   return table.join(flags, cfg.buildoptions)
 end
 
@@ -50,26 +45,12 @@ function m.getFileFlags(prj, cfg, node)
 end
 
 function m.generateCompileCommand(prj, cfg, node)
+  local compiler = _OPTIONS['cc_path'] or 'cc'
   return {
     directory = prj.location,
+    arguments = table.join({ compiler }, m.getFileFlags(prj, cfg, node)),
     file = node.abspath,
-    command = 'cc '.. table.concat(m.getFileFlags(prj, cfg, node), ' ')
   }
-end
-
-function m.includeFile(prj, node, depth)
-  return path.iscppfile(node.abspath)
-end
-
-function m.getConfig(prj)
-  if _OPTIONS['export-compile-commands-config'] then
-    return project.getconfig(prj, _OPTIONS['export-compile-commands-config'],
-      _OPTIONS['export-compile-commands-platform'])
-  end
-  for cfg in project.eachconfig(prj) do
-    -- just use the first configuration which is usually "Debug"
-    return cfg
-  end
 end
 
 function m.getProjectCommands(prj, cfg)
@@ -77,50 +58,62 @@ function m.getProjectCommands(prj, cfg)
   local cmds = {}
   p.tree.traverse(tr, {
     onleaf = function(node, depth)
-      if not m.includeFile(prj, node, depth) then
-        return
+      if path.iscppfile(node.abspath) then
+        table.insert(cmds, m.generateCompileCommand(prj, cfg, node))
       end
-      table.insert(cmds, m.generateCompileCommand(prj, cfg, node))
     end
   })
   return cmds
 end
 
+local function arguments_json_array(arguments)
+  local json_args = {}
+  for _, arg in ipairs(arguments) do
+    table.insert(json_args, '"' .. arg:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"')
+  end
+  return table.concat(json_args, ", ")
+end
+
 local function execute()
+  local target_name = _OPTIONS['config'] or 'release'
+
+  local cmds = {}
   for wks in p.global.eachWorkspace() do
-    local cfgCmds = {}
     for prj in workspace.eachproject(wks) do
       for cfg in project.eachconfig(prj) do
         local cfgKey = string.format('%s', cfg.shortname)
-        if not cfgCmds[cfgKey] then
-          cfgCmds[cfgKey] = {}
+        if cfgKey == target_name then
+          cmds = table.join(cmds, m.getProjectCommands(prj, cfg))
         end
-        cfgCmds[cfgKey] = table.join(cfgCmds[cfgKey], m.getProjectCommands(prj, cfg))
       end
     end
-    for cfgKey,cmds in pairs(cfgCmds) do
-      local outfile = string.format('compile_commands/%s.json', cfgKey)
-      p.generate(wks, outfile, function(wks)
-        p.w('[')
-        for i = 1, #cmds do
-          local item = cmds[i]
-          local command = string.format([[
-          {
-            "directory": "%s",
-            "file": "%s",
-            "command": "%s"
-          }]],
-          item.directory,
-          item.file,
-          item.command:gsub('\\', '\\\\'):gsub('"', '\\"'))
-          if i > 1 then
-            p.w(',')
-          end
-          p.w(command)
-        end
-        p.w(']')
-      end)
+
+    local outfile = 'compile_commands.json'
+    if _OPTIONS['out_dir'] then
+      local localpath = path.join(_OPTIONS['out_dir'], 'compile_commands.json')
+      outfile = path.getabsolute(path.join(wks.location or wks.basedir, localpath))
     end
+
+    p.generate(wks, outfile, function(wks)
+      p.w('[')
+      for i = 1, #cmds do
+        local item = cmds[i]
+        local command = string.format([[
+        {
+          "directory": "%s",
+          "file": "%s",
+          "arguments": [%s]
+        }]],
+        item.directory,
+        item.file,
+        arguments_json_array(item.arguments))
+        if i > 1 then
+          p.w(',')
+        end
+        p.w(command)
+      end
+      p.w(']')
+    end)
   end
 end
 
@@ -128,6 +121,28 @@ newaction {
   trigger = 'export-compile-commands',
   description = 'Export compiler commands in JSON Compilation Database Format',
   execute = execute
+}
+
+newoption {
+  trigger = 'cc_path',
+  description = 'path that will be used in compile commands',
+  default = 'cc'
+}
+
+newoption {
+  trigger = 'config',
+  description = 'configuration to use',
+}
+
+newoption {
+  trigger = 'force_clang_defines',
+  description = 'Used to fix issue when clangd on windows doesn\'t recognize msvc-style defines',
+  default = false
+}
+
+newoption {
+  trigger = 'out_dir',
+  description = 'Output directory for compile_commands.json',
 }
 
 return m

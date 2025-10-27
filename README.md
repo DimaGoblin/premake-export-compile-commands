@@ -27,18 +27,33 @@ for your projects:
 premake5 export-compile-commands
 ```
 
-The `export-compile-commands` action will generate one json file per
-config/platform combination in each workspace, all under the `compile_commands`
-subdirectory. For example, say you have defined `debug` and `release`
-configurations with `x32` and `x64` platforms, the output will be something
-like:
+The `export-compile-commands` action generates a `compile_commands.json` file
+in the workspace directory (or in the directory specified by the `out_dir` option)
+for the release configuration. This file contains the compilation commands for
+all C/C++ source files in your projects.
 
-```
-Generated WORKSPACE_BUILD_DIR/compile_commands/debug_x32.json...
-Generated WORKSPACE_BUILD_DIR/compile_commands/debug_x64.json...
-Generated WORKSPACE_BUILD_DIR/compile_commands/release_x32.json...
-Generated WORKSPACE_BUILD_DIR/compile_commands/release_x64.json...
+### Usage Examples
+
+#### Basic usage
+Generate compile commands with default settings (uses the release configuration):
+```bash
+premake5 export-compile-commands
 ```
 
-where each file contain the compilation commands for the corresponding
-config/platform combo.
+#### Using a specific config
+Generate compile commands with a specific configuration:
+```bash
+premake5 export-compile-commands --config=debug
+```
+
+#### Using a specific compiler
+Generate compile commands using clang++:
+```bash
+premake5 export-compile-commands --cc_path=/path/to/clang++
+```
+
+#### Custom output directory
+Generate the file in a specific directory:
+```bash
+premake5 export-compile-commands --out_dir=.vscode
+```
